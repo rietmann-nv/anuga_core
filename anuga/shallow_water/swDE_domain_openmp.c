@@ -506,8 +506,8 @@ double _openmp_compute_fluxes_central(struct domain *D,
   double boundary_flux_sum_substep = 0.0; 
 
 // For all triangles
-#pragma omp parallel for simd default(none) shared(D, substep_count, K) \
-                                     firstprivate(ncol_riverwall_hydraulic_properties, epsilon, g, low_froude, limiting_threshold) \
+//#pragma omp parallel for simd default(none) shared(D, substep_count, K) \
+//#pragma omp target enter data map(to: D[:1])                                     firstprivate(ncol_riverwall_hydraulic_properties, epsilon, g, low_froude, limiting_threshold) \
                                      private(i, ki, ki2, n, m, nm, ii,                                                  \
                                      max_speed_local, length, inv_area, zl, zr,                                         \
                                      h_left, h_right,                                                                   \
@@ -516,6 +516,11 @@ double _openmp_compute_fluxes_central(struct domain *D,
                                      hle, hre, zc, zc_n, Qfactor, s1, s2, h1, h2, pressure_flux, hc, hc_n,              \
                                      h_left_tmp, h_right_tmp, speed_max_last, weir_height, RiverWall_count)             \
                                      reduction(min : local_timestep) reduction(+:boundary_flux_sum_substep)
+
+#pragma omp target enter data map(to: D[:1])
+
+//#pragma omp target teams distribute parallel for defaultmap(tofrom:scalar) map(tofrom: D[:1]) reduction(+:boundary_flux_sum_substep)
+ #pragma omp target teams distribute parallel for defaultmap(tofrom:scalar) map(tofrom: D[:1]) reduction(+:boundary_flux_sum_substep) num_teams(1) thread_limit(1)
   for (k = 0; k < K; k++)
   {
     speed_max_last = 0.0;
@@ -525,6 +530,7 @@ double _openmp_compute_fluxes_central(struct domain *D,
     D->xmom_explicit_update[k] = 0.0;
     D->ymom_explicit_update[k] = 0.0;
 
+  printf("Reaching at start of loop and k=%d", &k);
     // Loop through neighbours and compute edge flux for each
     for (i = 0; i < 3; i++)
     {
@@ -714,9 +720,10 @@ double _openmp_compute_fluxes_central(struct domain *D,
     D->xmom_explicit_update[k] *= inv_area;
     D->ymom_explicit_update[k] *= inv_area;  
 
+printf("Reaching at end of loop and k=%d", &k);
   } // End triangle k
 
-
+#pragma omp target exit data map(from: D[:1])
 
 //   // Now add up stage, xmom, ymom explicit updates
 

@@ -19,11 +19,11 @@
 #include <string.h>
 #include <assert.h>
 
-// #if defined(__APPLE__)
-// // clang doesn't have openmp
-// #else
-// #include "omp.h"
-// #endif
+#if defined(__APPLE__)
+// clang doesn't have openmp
+#else
+#include "omp.h"
+#endif
 
 #include "sw_domain.h"
 
@@ -265,7 +265,7 @@ int __flux_function_central(double *q_left, double *q_right,
   return 0;
 }
 
-int __openacc__flux_function_central(double q_left0, double q_left1, double q_left2,
+int __openmp__flux_function_central(double q_left0, double q_left1, double q_left2,
                                    double q_right0, double q_right1, double q_right2,
                                    double h_left, double h_right,
                                    double hle, double hre,
@@ -423,7 +423,7 @@ double __adjust_edgeflux_with_weir(double *edgeflux,
   return 0;
 }
 
-double __openacc__adjust_edgeflux_with_weir(double *edgeflux0, double *edgeflux1, double *edgeflux2,
+double __openmp__adjust_edgeflux_with_weir(double *edgeflux0, double *edgeflux1, double *edgeflux2,
                                           double h_left, double h_right,
                                           double g, double weir_height,
                                           double Qfactor,
@@ -506,7 +506,7 @@ double _openacc_compute_fluxes_central(struct domain *D,
   double boundary_flux_sum_substep = 0.0; 
 
 // For all triangles
-#pragma acc  parallel loop \
+//#pragma omp parallel for simd default(none) shared(D, substep_count, K) \
                                      firstprivate(ncol_riverwall_hydraulic_properties, epsilon, g, low_froude, limiting_threshold) \
                                      private(i, ki, ki2, n, m, nm, ii,                                                  \
                                      max_speed_local, length, inv_area, zl, zr,                                         \
@@ -516,10 +516,25 @@ double _openacc_compute_fluxes_central(struct domain *D,
                                      hle, hre, zc, zc_n, Qfactor, s1, s2, h1, h2, pressure_flux, hc, hc_n,              \
                                      h_left_tmp, h_right_tmp, speed_max_last, weir_height, RiverWall_count)             \
                                      reduction(min : local_timestep) reduction(+:boundary_flux_sum_substep)
+  
+//GPU Offload code
 
+#pragma acc data copyin(D->radii[0:K], D->neighbours[0:3 * K], D->normals[0:2 * 3 * K], \
+                            D->tri_full_flag[0:K], D->height_centroid_values[0:K], D->bed_centroid_values[0:K], \
+                            D->height_edge_values[0:3 * K], D->bed_edge_values[0:3 * K], \
+                            D->edge_flux_type[0:3 * K], D->edge_river_wall_counter[0:3 * K], D->riverwall_rowIndex[0:D->ncol_riverwall_hydraulic_properties], \
+                            D->riverwall_elevation[0:D->number_of_elements], \
+                            D->riverwall_hydraulic_properties[0:D->ncol_riverwall_hydraulic_properties]) \
+              copy(D->stage_explicit_update[0:K], D->xmom_explicit_update[0:K], D->ymom_explicit_update[0:K], \
+                   D->max_speed[0:K], D->boundary_flux_sum[0:D->timestep_fluxcalls])
 
+{
  
-  for (k = 0; k < K; k++)
+#pragma acc enter data copyin(max_speed_local, length, inv_area, zl, zr, h_left, h_right, z_half, ql[0:3], qr[0:3], pressuregrad_work, edge_timestep, normal_x, normal_y, hle, hre, zc, zc_n, Qfactor, s1, s2, h1, h2, pressure_flux, hc, hc_n, h_left_tmp, h_right_tmp, speed_max_last, weir_height, RiverWall_count)
+
+//#pragma acc parallel loop private(ki, ki2, i, max_speed_local, length, inv_area, zl, zr, h_left, h_right, z_half, ql, qr, pressuregrad_work, edge_timestep, normal_x, normal_y, hle, hre, zc, zc_n, Qfactor, s1, s2, h1, h2, pressure_flux, hc, hc_n, h_left_tmp, h_right_tmp, speed_max_last, weir_height, RiverWall_count)
+#pragma acc parallel loop
+for (k = 0; k < K; k++)
   {
     speed_max_last = 0.0;
     // Set explicit_update to zero for all conserved_quantities.
@@ -719,15 +734,17 @@ double _openacc_compute_fluxes_central(struct domain *D,
 
   } // End triangle k
 
-
-
-  // variable to accumulate D->boundary_flux_sum[substep_count]
   D->boundary_flux_sum[substep_count] = boundary_flux_sum_substep;  
 
   // Ensure we only update the timestep on the first call within each rk2/rk3 step
   if (substep_count == 0)
     timestep = local_timestep;
 
+  #pragma acc exit data delete(max_speed_local, length, inv_area, zl, zr, h_left, h_right, z_half, ql[0:3], qr[0:3], \
+pressuregrad_work, edge_timestep, normal_x, normal_y, hle, hre, zc, zc_n, Qfactor, s1, s2, h1, \
+h2, pressure_flux, hc, hc_n, h_left_tmp, h_right_tmp, speed_max_last, weir_height, RiverWall_count)
+
+  }
   return timestep;
 }
 
@@ -1051,7 +1068,7 @@ double _compute_fluxes_central_parallel_data_flow(struct domain *D, double times
 
 
 
-
+/*
 // Protect against the water elevation falling below the triangle bed
 double _openacc_protect(struct domain *D)
 {
@@ -1060,35 +1077,30 @@ double _openacc_protect(struct domain *D)
   double hc, bmin;
   double mass_error = 0.;
 
-  // double *wc;
-  // double *zc;
-  // double *wv;
-  // double *xmomc;
-  // double *ymomc;
-  // double *areas;
-
   double minimum_allowed_height;
 
   minimum_allowed_height = D->minimum_allowed_height;
 
   K = D->number_of_elements;
-
-  // wc = D->stage_centroid_values;
-  // zc = D->bed_centroid_values;
-  // wv = D->stage_vertex_values;
-  // xmomc = D->xmom_centroid_values;
-  // ymomc = D->xmom_centroid_values;
-  // areas = D->areas;
-
-  // This acts like minimum_allowed height, but scales with the vertical
-  // distance between the bed_centroid_value and the max bed_edge_value of
-  // every triangle.
-  // double minimum_relative_height=0.05;
-  // int mass_added = 0;
+  
+  //Map required variables to GPU memory
+  double *stage_centroid_values = D->stage_centroid_values;
+  double *bed_centroid_values = D->bed_centroid_values;
+  double *xmom_centroid_values = D->xmom_centroid_values;
+  double *ymom_centroid_values = D->ymom_centroid_values;
+  double *stage_vertex_values = D->stage_vertex_values;
+  double *areas = D->areas;
 
   // Protect against inifintesimal and negative heights
   // if (maximum_allowed_speed < epsilon) {
-// #pragma omp parallel for private(k, k3, hc, bmin ) schedule(static) reduction(+ : mass_error) firstprivate (minimum_allowed_height)
+//#pragma omp parallel for private(k, k3, hc, bmin ) schedule(static) reduction(+ : mass_error) firstprivate (minimum_allowed_height)
+
+//#pragma acc data present(stage_centroid_values[:K], bed_centroid_values[:K], xmom_centroid_values[:K], ymom_centroid_values[:K], stage_vertex_values, areas)
+#pragma acc data present(D->stage_centroid_values[:K], D->bed_centroid_values[:K], \
+                             D->xmom_centroid_values[:K], D->ymom_centroid_values[:K], \
+                             D->stage_vertex_values[:3*K], D->areas[:K])  
+ {
+  #pragma acc parallel loop private(k, k3, hc, bmin) reduction(+: mass_error) firstprivate(minimum_allowed_height) 
   for (k = 0; k < K; k++)
   {
     k3 = 3*k;
@@ -1122,12 +1134,124 @@ double _openacc_protect(struct domain *D)
       }
     }
   }
-
+}
   // if(mass_added == 1){
   //   printf("Cumulative mass protection: %f m^3 \n", mass_error);
   // }
 
   return mass_error;
+}
+*/
+
+/*
+double _openacc_protect(struct domain *D)
+{
+    int k, k3, K;
+    double hc, bmin;
+    double mass_error = 0.;
+    double minimum_allowed_height;
+    minimum_allowed_height = D->minimum_allowed_height;
+    K = D->number_of_elements;
+
+   //Map required variables to GPU memory
+    double *stage_centroid_values = D->stage_centroid_values;
+    double *bed_centroid_values = D->bed_centroid_values;
+    double *xmom_centroid_values = D->xmom_centroid_values;
+    double *ymom_centroid_values = D->ymom_centroid_values;
+    double *stage_vertex_values = D->stage_vertex_values;
+    double *areas = D->areas;
+
+    #pragma acc data present(stage_centroid_values[:K], bed_centroid_values, xmom_centroid_values, ymom_centroid_values, stage_vertex_values, areas)
+    {
+        #pragma acc parallel loop private(k, k3, hc, bmin) reduction(+: mass_error) firstprivate(minimum_allowed_height)
+        for (k = 0; k < K; k++)
+        {
+            k3 = 3*k;
+            double *stage_centroid_ptr = &stage_centroid_values[k];
+            double *bed_centroid_ptr = &bed_centroid_values[k];
+            double *xmom_centroid_ptr = &xmom_centroid_values[k];
+            double *ymom_centroid_ptr = &ymom_centroid_values[k];
+            double *stage_vertex_ptr = &stage_vertex_values[k3];
+
+            hc = *stage_centroid_ptr - *bed_centroid_ptr;
+            if (hc < minimum_allowed_height * 1.0)
+            {
+                // Set momentum to zero and ensure h is non negative
+                *xmom_centroid_ptr = 0.;
+                *ymom_centroid_ptr = 0.;
+                if (hc <= 0.0)
+                {
+                    bmin = *bed_centroid_ptr;
+                    // Minimum allowed stage = bmin
+                    // WARNING: ADDING MASS if wc[k]<bmin
+                    if (*stage_centroid_ptr < bmin)
+                    {
+                        mass_error += (bmin - *stage_centroid_ptr) * areas[k];
+                        *stage_centroid_ptr = bmin;
+
+                        stage_vertex_ptr[0] = bmin;
+                        stage_vertex_ptr[1] = bmin;
+                        stage_vertex_ptr[2] = bmin;
+                    }
+                }
+            }
+        }
+    }
+    return mass_error;
+}
+*/
+
+
+double _openacc_protect(struct domain *D)
+{
+    int k, k3, K;
+    double hc, bmin;
+    double mass_error = 0.;
+    double minimum_allowed_height;
+    minimum_allowed_height = D->minimum_allowed_height;
+    K = D->number_of_elements;
+
+    double *stage_centroid_values = D->stage_centroid_values;
+    double *bed_centroid_values = D->bed_centroid_values;
+    double *xmom_centroid_values = D->xmom_centroid_values;
+    double *ymom_centroid_values = D->ymom_centroid_values;
+    double *stage_vertex_values = D->stage_vertex_values;
+    double *areas = D->areas;
+
+    #pragma acc data pcopyout(stage_centroid_values[0:K], bed_centroid_values[0:K], xmom_centroid_values[0:K], ymom_centroid_values[0:K], stage_vertex_values[0:3*K], areas[0:K])
+    {
+        #pragma acc parallel loop private(k, k3, hc, bmin) reduction(+: mass_error) firstprivate(minimum_allowed_height)
+        for (k = 0; k < K; k++)
+        {
+            k3 = 3 * k;
+            double *stage_centroid_ptr = &stage_centroid_values[k];
+            double *bed_centroid_ptr = &bed_centroid_values[k];
+            double *xmom_centroid_ptr = &xmom_centroid_values[k];
+            double *ymom_centroid_ptr = &ymom_centroid_values[k];
+            double *stage_vertex_ptr = &stage_vertex_values[k3];
+
+            hc = *stage_centroid_ptr - *bed_centroid_ptr;
+            if (hc < minimum_allowed_height * 1.0)
+            {
+                *xmom_centroid_ptr = 0.;
+                *ymom_centroid_ptr = 0.;
+                if (hc <= 0.0)
+                {
+                    bmin = *bed_centroid_ptr;
+                    if (*stage_centroid_ptr < bmin)
+                    {
+                        mass_error += (bmin - *stage_centroid_ptr) * areas[k];
+                        *stage_centroid_ptr = bmin;
+
+                        stage_vertex_ptr[0] = bmin;
+                        stage_vertex_ptr[1] = bmin;
+                        stage_vertex_ptr[2] = bmin;
+                    }
+                }
+            }
+        }
+    }
+    return mass_error;
 }
 
 
@@ -1288,10 +1412,7 @@ static inline void __calc_edge_values_2_bdy(double beta, double cv_k, double cv_
 
 }
 
-
-
-
-
+/*
 // Computational routine
 int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
 {
@@ -1307,10 +1428,10 @@ int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
   double edge_values[3];
   double cv_k, cv_k0, cv_k1, cv_k2;
 
-  double x_centroid_work;
-  double xmom_centroid_values;
-  double y_centroid_work;
-  double ymom_centroid_values;
+  //double x_centroid_work;
+  //double xmom_centroid_values;
+  //double y_centroid_work;
+  //double ymom_centroid_values;
 
   double minimum_allowed_height = D->minimum_allowed_height;
   long number_of_elements = D->number_of_elements;
@@ -1324,16 +1445,50 @@ int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
   c_tmp = 1.0 / (a_tmp - b_tmp);
   d_tmp = 1.0 - (c_tmp * a_tmp);
 
+  double *x_centroid_work = D->x_centroid_work;
+  double *xmom_centroid_values = D->xmom_centroid_values;
+  double *y_centroid_work = D->y_centroid_work;
+  double *ymom_centroid_values = D->ymom_centroid_values;
+
+
   // Replace momentum centroid with velocity centroid to allow velocity
   // extrapolation This will be changed back at the end of the routine
 
   // Need to calculate height xmom and ymom centroid values for all triangles 
   // before extrapolation and limiting
 
-// #pragma omp parallel for simd shared(D) default(none) private(dk, dk_inv) firstprivate(number_of_elements, minimum_allowed_height, extrapolate_velocity_second_order)
+//#pragma omp parallel for simd shared(D) default(none) private(dk, dk_inv) firstprivate(number_of_elements, minimum_allowed_height, extrapolate_velocity_second_order)
+
+//#pragma acc data present(D, x_centroid_work, xmom_centroid_values, y_centroid_work, ymom_centroid_values)
+//  #pragma acc data copyin(x_centroid_work[0:number_of_elements], xmom_centroid_values[0:number_of_elements], y_centroid_work[0:number_of_elements], ymom_centroid_values[0:number_of_elements]) copy(height_centroid_values[0:number_of_elements], stage_centroid_values[0:number_of_elements], height_edge_values[0:3*number_of_elements], stage_edge_values[0:3*number_of_elements], xmom_edge_values[0:3*number_of_elements], ymom_edge_values[0:3*number_of_elements], x_centroid_work[0:number_of_elements], y_centroid_work[0:number_of_elements]) create(xm4,ym4,xm5,ym5,ncxy0,ncxy1,ncxy2,ncxy3,ncxy4,ncxy5)
+//#pragma acc enter data copyin(D[:1]) \
+                 copyin(D->x_centroid_work[:number_of_elements], \
+                        D->xmom_centroid_values[:number_of_elements], \
+                        D->y_centroid_work[:number_of_elements], \
+                        D->ymom_centroid_values[:number_of_elements])
+ 
+//#pragma acc enter data copyin(D[:1]) \
+                      create(x_centroid_work_dev[:number_of_elements], \
+                             xmom_centroid_values_dev[:number_of_elements], \
+                             y_centroid_work_dev[:number_of_elements], \
+                             ymom_centroid_values_dev[:number_of_elements])
+//#pragma acc data present(D, x_centroid_work_dev, xmom_centroid_values_dev, y_centroid_work_dev, ymom_centroid_values_dev) 
+
+//#pragma acc enter data create(D[:1])
+//#pragma acc enter data create(D->height_centroid_values[:number_of_elements], D->x_centroid_work[:number_of_elements], D->y_centroid_work[:number_of_elements], D->xmom_centroid_values[:number_of_elements], D->ymom_centroid_values[:number_of_elements], D->height_edge_values[:3 * number_of_elements], D->stage_edge_values[:3 * number_of_elements], D->xmom_edge_values[:3 * number_of_elements], D->ymom_edge_values[:3 * number_of_elements], D->bed_edge_values[:3 * number_of_elements], D->stage_vertex_values[:3 * number_of_elements], D->height_vertex_values[:3 * number_of_elements], D->xmom_vertex_values[:3 * number_of_elements], D->ymom_vertex_values[:3 * number_of_elements], D->bed_vertex_values[:3 * number_of_elements])
+{
+    //#pragma acc parallel loop present(D, x_centroid_work, xmom_centroid_values, y_centroid_work, ymom_centroid_values) async gang vector  
+ // #pragma acc parallel loop async gang vector
+//#pragma acc parallel loop present(D[:1], D->height_centroid_values[:number_of_elements], D->x_centroid_work[:number_of_elements], D->y_centroid_work[:number_of_elements], D->xmom_centroid_values[:number_of_elements], D->ymom_centroid_values[:number_of_elements])
     for (k = 0; k < number_of_elements; k++)
     {
     dk = fmax(D->stage_centroid_values[k] - D->bed_centroid_values[k], 0.0);
+
+   // x_centroid_work_dev[k] = D->x_centroid_work[k];
+   // xmom_centroid_values_dev[k] = D->xmom_centroid_values[k];
+   // y_centroid_work_dev[k] = D->y_centroid_work[k];
+   // ymom_centroid_values_dev[k] = D->ymom_centroid_values[k];
+
 
     D->height_centroid_values[k] = dk;
     D->x_centroid_work[k] = 0.0;
@@ -1359,13 +1514,13 @@ int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
         D->ymom_centroid_values[k] = D->ymom_centroid_values[k] * dk_inv;
       }
     }
-    } // end of for
+  } // end of for
 
-
+//#pragma acc wait
 
   // Begin extrapolation routine
 
-// #pragma omp parallel for simd private(k0, k1, k2, k3, k6, coord_index, i, \
+//#pragma omp parallel for simd private(k0, k1, k2, k3, k6, coord_index, i, \
                           dx1, dx2, dy1, dy2, dxv0, dxv1, dxv2, dyv0, dyv1, dyv2, \
                           x_centroid_work, xmom_centroid_values, y_centroid_work, ymom_centroid_values, \
                           dq1, area2, inv_area2, \
@@ -1375,7 +1530,11 @@ int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
                           hc, h0, h1, h2, beta_tmp, hfactor, \
                           dk, dk_inv, a, b) default(none) shared(D) \
                           firstprivate(number_of_elements, minimum_allowed_height, extrapolate_velocity_second_order, c_tmp, d_tmp)
-  for (k = 0; k < number_of_elements; k++)
+
+//#pragma acc parallel loop present(D, x_centroid_work, xmom_centroid_values, y_centroid_work, ymom_centroid_values) async gang vector  
+// #pragma acc parallel loop async gang vector
+//#pragma acc parallel loop present(D[:1], D->height_centroid_values[:number_of_elements], D->x_centroid_work[:number_of_elements], D->y_centroid_work[:number_of_elements], D->xmom_centroid_values[:number_of_elements], D->ymom_centroid_values[:number_of_elements], D->edge_coordinates[:6 * number_of_elements], D->centroid_coordinates[:2 * number_of_elements], D->surrogate_neighbours[:3 * number_of_elements], D->number_of_boundaries[:number_of_elements])   
+for (k = 0; k < number_of_elements; k++)
   {
 
     //printf("%ld, %e \n",k, D->height_centroid_values[k]);
@@ -1801,12 +1960,6 @@ int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
 
     } // else [number_of_boundaries]
 
-  // printf("%ld, bed    %e, %e, %e\n",k, D->bed_edge_values[k3],D->bed_edge_values[k3 + 1],D->bed_edge_values[k3 + 2] );
-  // printf("%ld, stage  %e, %e, %e\n",k, D->stage_edge_values[k3],D->stage_edge_values[k3 + 1],D->stage_edge_values[k3 + 2] );
-  // printf("%ld, height %e, %e, %e\n",k, D->height_edge_values[k3],D->height_edge_values[k3 + 1],D->height_edge_values[k3 + 2] );
-  // printf("%ld, xmom   %e, %e, %e\n",k, D->xmom_edge_values[k3],D->xmom_edge_values[k3 + 1],D->xmom_edge_values[k3 + 2] );
-  // printf("%ld, ymom   %e, %e, %e\n",k, D->ymom_edge_values[k3],D->ymom_edge_values[k3 + 1],D->ymom_edge_values[k3 + 2] );
-
     // If needed, convert from velocity to momenta
     if (D->extrapolate_velocity_second_order == 1)
     {
@@ -1854,10 +2007,15 @@ int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
 
 
   }   // for k=0 to number_of_elements-1
+// #pragma acc wait
+
 
 // Fix xmom and ymom centroid values
-// #pragma omp parallel for simd private(k3, i, dk) firstprivate(extrapolate_velocity_second_order)
-  for (k = 0; k < D->number_of_elements; k++)
+//#pragma omp parallel for simd private(k3, i, dk) firstprivate(extrapolate_velocity_second_order)
+//#pragma acc parallel loop present(D, x_centroid_work, xmom_centroid_values, y_centroid_work, ymom_centroid_values) async gang vector
+ // #pragma acc parallel loop async gang vector
+#pragma acc parallel loop present(D[:1], D->height_centroid_values[:number_of_elements], D->x_centroid_work[:number_of_elements], D->y_centroid_work[:number_of_elements], D->xmom_centroid_values[:number_of_elements], D->ymom_centroid_values[:number_of_elements], D->height_edge_values[:3 * number_of_elements], D->stage_edge_values[:3 * number_of_elements], D->xmom_edge_values[:3 * number_of_elements], D->ymom_edge_values[:3 * number_of_elements], D->bed_edge_values[:3 * number_of_elements], D->stage_vertex_values[:3 * number_of_elements], D->height_vertex_values[:3 * number_of_elements], D->xmom_vertex_values[:3 * number_of_elements], D->ymom_vertex_values[:3 * number_of_elements], D->bed_vertex_values[:3 * number_of_elements])   
+for (k = 0; k < D->number_of_elements; k++)
   {
     if (extrapolate_velocity_second_order == 1)
     {
@@ -1866,60 +2024,444 @@ int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
       D->ymom_centroid_values[k] = D->y_centroid_work[k];
     }
 
-    // // Compute stage vertex values
-    // D->stage_vertex_values[k3] = D->stage_edge_values[k3 + 1] + D->stage_edge_values[k3 + 2] - D->stage_edge_values[k3];
-    // D->stage_vertex_values[k3 + 1] = D->stage_edge_values[k3] + D->stage_edge_values[k3 + 2] - D->stage_edge_values[k3 + 1];
-    // D->stage_vertex_values[k3 + 2] = D->stage_edge_values[k3] + D->stage_edge_values[k3 + 1] - D->stage_edge_values[k3 + 2];
-
-    // // Compute height vertex values
-    // D->height_vertex_values[k3] = D->height_edge_values[k3 + 1] + D->height_edge_values[k3 + 2] - D->height_edge_values[k3];
-    // D->height_vertex_values[k3 + 1] = D->height_edge_values[k3] + D->height_edge_values[k3 + 2] - D->height_edge_values[k3 + 1];
-    // D->height_vertex_values[k3 + 2] = D->height_edge_values[k3] + D->height_edge_values[k3 + 1] - D->height_edge_values[k3 + 2];
-
-    // // If needed, convert from velocity to momenta
-    // if (D->extrapolate_velocity_second_order == 1)
-    // {
-    //   // Re-compute momenta at edges
-    //   for (i = 0; i < 3; i++)
-    //   {
-    //     dk = D->height_edge_values[k3 + i];
-    //     D->xmom_edge_values[k3 + i] = D->xmom_edge_values[k3 + i] * dk;
-    //     D->ymom_edge_values[k3 + i] = D->ymom_edge_values[k3 + i] * dk;
-    //   }
-    // }
-
-    // // Compute momenta at vertices
-    // D->xmom_vertex_values[k3 + 0] = D->xmom_edge_values[k3 + 1] + D->xmom_edge_values[k3 + 2] - D->xmom_edge_values[k3 + 0];
-    // D->xmom_vertex_values[k3 + 1] = D->xmom_edge_values[k3 + 0] + D->xmom_edge_values[k3 + 2] - D->xmom_edge_values[k3 + 1];
-    // D->xmom_vertex_values[k3 + 2] = D->xmom_edge_values[k3 + 0] + D->xmom_edge_values[k3 + 1] - D->xmom_edge_values[k3 + 2];
-
-    // D->ymom_vertex_values[k3 + 0] = D->ymom_edge_values[k3 + 1] + D->ymom_edge_values[k3 + 2] - D->ymom_edge_values[k3 + 0];
-    // D->ymom_vertex_values[k3 + 1] = D->ymom_edge_values[k3 + 0] + D->ymom_edge_values[k3 + 2] - D->ymom_edge_values[k3 + 1];
-    // D->ymom_vertex_values[k3 + 2] = D->ymom_edge_values[k3 + 0] + D->ymom_edge_values[k3 + 1] - D->ymom_edge_values[k3 + 2];
-
-    // // Compute new bed elevation
-    // D->bed_edge_values[k3 + 0] = D->stage_edge_values[k3 + 0] - D->height_edge_values[k3 + 0];
-    // D->bed_edge_values[k3 + 1] = D->stage_edge_values[k3 + 1] - D->height_edge_values[k3 + 1];
-    // D->bed_edge_values[k3 + 2] = D->stage_edge_values[k3 + 2] - D->height_edge_values[k3 + 2];
-
-    // D->bed_vertex_values[k3 + 0] = D->bed_edge_values[k3 + 1] + D->bed_edge_values[k3 + 2] - D->bed_edge_values[k3 + 0];
-    // D->bed_vertex_values[k3 + 1] = D->bed_edge_values[k3 + 0] + D->bed_edge_values[k3 + 2] - D->bed_edge_values[k3 + 1];
-    // D->bed_vertex_values[k3 + 2] = D->bed_edge_values[k3 + 0] + D->bed_edge_values[k3 + 1] - D->bed_edge_values[k3 + 2];
-
   }
+
+//#pragma acc wait
+ #pragma acc exit data delete(D[:1], D->height_centroid_values[:number_of_elements], D->x_centroid_work[:number_of_elements], D->y_centroid_work[:number_of_elements], D->xmom_centroid_values[:number_of_elements], D->ymom_centroid_values[:number_of_elements], D->height_edge_values[:3 * number_of_elements], D->stage_edge_values[:3 * number_of_elements], D->xmom_edge_values[:3 * number_of_elements], D->ymom_edge_values[:3 * number_of_elements], D->bed_edge_values[:3 * number_of_elements], D->stage_vertex_values[:3 * number_of_elements], D->height_vertex_values[:3 * number_of_elements], D->xmom_vertex_values[:3 * number_of_elements], D->ymom_vertex_values[:3 * number_of_elements], D->bed_vertex_values[:3 * number_of_elements])
+
+ }
+  return 0;
+}
+
+*/
+
+
+int _openacc_extrapolate_second_order_edge_sw(struct domain *D)
+{
+
+  double a, b; // Gradient vector used to calculate edge values from centroids
+  long k, k0, k1, k2, k3, k6, coord_index, i;
+  double x, y, x0, y0, x1, y1, x2, y2, xv0, yv0, xv1, yv1, xv2, yv2; // Vertices of the auxiliary triangle
+  double dx1, dx2, dy1, dy2, dxv0, dxv1, dxv2, dyv0, dyv1, dyv2, dq1, area2, inv_area2;
+  double dqv[3], qmin, qmax, hmin, hmax;
+  double hc, h0, h1, h2, beta_tmp, hfactor;
+  double dk, dk_inv, a_tmp, b_tmp, c_tmp, d_tmp;
+  double edge_values[3];
+  double cv_k, cv_k0, cv_k1, cv_k2;
+
+  double x_centroid_work;
+  double xmom_centroid_values;
+  double y_centroid_work;
+  double ymom_centroid_values;
+
+  double minimum_allowed_height = D->minimum_allowed_height;
+  long number_of_elements = D->number_of_elements;
+  long extrapolate_velocity_second_order = D->extrapolate_velocity_second_order;
+  
+  a_tmp = 0.3; // Highest depth ratio with hfactor=1
+  b_tmp = 0.1; // Highest depth ratio with hfactor=0
+  c_tmp = 1.0 / (a_tmp - b_tmp);
+  d_tmp = 1.0 - (c_tmp * a_tmp);
+
+  #pragma omp parallel for simd shared(D) default(none) private(dk, dk_inv) firstprivate(number_of_elements, minimum_allowed_height, extrapolate_velocity_second_order)
+    for (k = 0; k < number_of_elements; k++)
+    {
+    dk = fmax(D->stage_centroid_values[k] - D->bed_centroid_values[k], 0.0);
+
+    D->height_centroid_values[k] = dk;
+    D->x_centroid_work[k] = 0.0;
+    D->y_centroid_work[k] = 0.0;
+
+    if (dk <= minimum_allowed_height)
+      {
+        D->x_centroid_work[k] = 0.0;
+        D->xmom_centroid_values[k] = 0.0;
+        D->y_centroid_work[k] = 0.0;
+        D->ymom_centroid_values[k] = 0.0;
+      }
+
+    if (extrapolate_velocity_second_order == 1)
+    {
+      if (dk > minimum_allowed_height)
+      {
+        dk_inv = 1.0 / dk;
+        D->x_centroid_work[k] = D->xmom_centroid_values[k];
+        D->xmom_centroid_values[k] = D->xmom_centroid_values[k] * dk_inv;
+
+        D->y_centroid_work[k] = D->ymom_centroid_values[k];
+        D->ymom_centroid_values[k] = D->ymom_centroid_values[k] * dk_inv;
+      }
+    }
+   } // end of for
+
+  #pragma omp parallel for simd private(k0, k1, k2, k3, k6, coord_index, i, \
+                          dx1, dx2, dy1, dy2, dxv0, dxv1, dxv2, dyv0, dyv1, dyv2, \
+                          x_centroid_work, xmom_centroid_values, y_centroid_work, ymom_centroid_values, \
+                          dq1, area2, inv_area2, \
+                          cv_k, cv_k0, cv_k1, cv_k2, edge_values, \
+                          x, y, x0, y0, x1, y1, x2, y2, xv0, yv0, xv1, yv1, xv2, yv2, \
+                          dqv, qmin, qmax, hmin, hmax, \
+                          hc, h0, h1, h2, beta_tmp, hfactor, \
+                          dk, dk_inv, a, b) default(none) shared(D) \
+                          firstprivate(number_of_elements, minimum_allowed_height, extrapolate_velocity_second_order, c_tmp, d_tmp)
+  for (k = 0; k < number_of_elements; k++)
+  {
+    k2 = k * 2;
+    k3 = k * 3;
+    k6 = k * 6;
+    
+    xv0 = D->edge_coordinates[k6 + 0];
+    yv0 = D->edge_coordinates[k6 + 1];
+    xv1 = D->edge_coordinates[k6 + 2];
+    yv1 = D->edge_coordinates[k6 + 3];
+    xv2 = D->edge_coordinates[k6 + 4];
+    yv2 = D->edge_coordinates[k6 + 5];
+
+    x = D->centroid_coordinates[k2 + 0];
+    y = D->centroid_coordinates[k2 + 1];
+
+    dxv0 = xv0 - x;
+    dxv1 = xv1 - x;
+    dxv2 = xv2 - x;
+    dyv0 = yv0 - y;
+    dyv1 = yv1 - y;
+    dyv2 = yv2 - y;
+
+
+    k0 = D->surrogate_neighbours[k3 + 0];
+    k1 = D->surrogate_neighbours[k3 + 1];
+    k2 = D->surrogate_neighbours[k3 + 2];
+
+    coord_index = 2 * k0;
+    x0 = D->centroid_coordinates[coord_index + 0];
+    y0 = D->centroid_coordinates[coord_index + 1];
+
+    coord_index = 2 * k1;
+    x1 = D->centroid_coordinates[coord_index + 0];
+    y1 = D->centroid_coordinates[coord_index + 1];
+
+    coord_index = 2 * k2;
+    x2 = D->centroid_coordinates[coord_index + 0];
+    y2 = D->centroid_coordinates[coord_index + 1];
+
+    dx1 = x1 - x0;
+    dx2 = x2 - x0;
+    dy1 = y1 - y0;
+    dy2 = y2 - y0;
+
+    area2 = dy2 * dx1 - dy1 * dx2;
+
+    if (((D->height_centroid_values[k0] < minimum_allowed_height) | (k0 == k)) &
+        ((D->height_centroid_values[k1] < minimum_allowed_height) | (k1 == k)) &
+        ((D->height_centroid_values[k2] < minimum_allowed_height) | (k2 == k)))
+      {
+        D->x_centroid_work[k] = 0.;
+        D->xmom_centroid_values[k] = 0.;
+        D->y_centroid_work[k] = 0.;
+        D->ymom_centroid_values[k] = 0.;
+       }
+
+    if (D->number_of_boundaries[k] == 3)
+        {
+	  D->stage_edge_values[k3 + 0] = D->stage_centroid_values[k];
+	  D->stage_edge_values[k3 + 1] = D->stage_centroid_values[k];
+      	  D->stage_edge_values[k3 + 2] = D->stage_centroid_values[k];
+
+	  D->xmom_edge_values[k3 + 0] = D->xmom_centroid_values[k];
+	  D->xmom_edge_values[k3 + 1] = D->xmom_centroid_values[k];
+	  D->xmom_edge_values[k3 + 2] = D->xmom_centroid_values[k];
+
+	  D->ymom_edge_values[k3 + 0] = D->ymom_centroid_values[k];
+	  D->ymom_edge_values[k3 + 1] = D->ymom_centroid_values[k];
+	  D->ymom_edge_values[k3 + 2] = D->ymom_centroid_values[k];
+
+	  dk = D->height_centroid_values[k];
+	  D->height_edge_values[k3 + 0] = dk;
+	  D->height_edge_values[k3 + 1] = dk;
+	  D->height_edge_values[k3 + 2] = dk;
+
+    	}
+
+    else if (D->number_of_boundaries[k] <= 1)
+    {
+	hc = D->height_centroid_values[k];
+	h0 = D->height_centroid_values[k0];
+	h1 = D->height_centroid_values[k1];
+	h2 = D->height_centroid_values[k2];
+
+	hmin = fmin(fmin(h0, fmin(h1, h2)), hc);
+        hmax = fmax(fmax(h0, fmax(h1, h2)), hc);
+
+        hfactor = fmax(0., fmin(c_tmp * fmax(hmin, 0.0) / fmax(hc, 1.0e-06) + d_tmp,
+                              fmin(c_tmp * fmax(hc, 0.) / fmax(hmax, 1.0e-06) + d_tmp, 1.0)));
+        hfactor = fmin(1.2 * fmax(hmin - D->minimum_allowed_height, 0.) / (fmax(hmin, 0.) + 1. * D->minimum_allowed_height), hfactor);
+	inv_area2 = 1.0 / area2;
+        beta_tmp = D->beta_w_dry + (D->beta_w - D->beta_w_dry) * hfactor;
+        
+        cv_k  = D->stage_centroid_values[k];
+	cv_k0 = D->stage_centroid_values[k0];
+      	cv_k1 = D->stage_centroid_values[k1];
+        cv_k2 = D->stage_centroid_values[k2];
+
+      __calc_edge_values(beta_tmp, 
+                         cv_k, 
+                         cv_k0,
+                         cv_k1,
+                         cv_k2,
+                         dxv0, dxv1, dxv2, dyv0, dyv1, dyv2,
+                         dx1, dx2, dy1, dy2, inv_area2, edge_values);
+
+      D->stage_edge_values[k3 + 0] = edge_values[0];
+      D->stage_edge_values[k3 + 1] = edge_values[1];
+      D->stage_edge_values[k3 + 2] = edge_values[2]; 
+
+      cv_k  = D->height_centroid_values[k];
+      cv_k0 = D->height_centroid_values[k0];
+      cv_k1 = D->height_centroid_values[k1];
+      cv_k2 = D->height_centroid_values[k2];
+
+      __calc_edge_values(beta_tmp, 
+                         cv_k, 
+                         cv_k0,
+                         cv_k1,
+                         cv_k2,
+                         dxv0, dxv1, dxv2, dyv0, dyv1, dyv2,
+                         dx1, dx2, dy1, dy2, inv_area2, edge_values);
+
+      D->height_edge_values[k3 + 0] = edge_values[0];
+      D->height_edge_values[k3 + 1] = edge_values[1];
+      D->height_edge_values[k3 + 2] = edge_values[2]; 
+
+      beta_tmp = D->beta_uh_dry + (D->beta_uh - D->beta_uh_dry) * hfactor;
+
+      cv_k  = D->xmom_centroid_values[k];
+      cv_k0 = D->xmom_centroid_values[k0];
+      cv_k1 = D->xmom_centroid_values[k1];
+      cv_k2 = D->xmom_centroid_values[k2];
+
+      __calc_edge_values(beta_tmp, 
+                         cv_k, 
+                         cv_k0,
+                         cv_k1,
+                         cv_k2,
+                         dxv0, dxv1, dxv2, dyv0, dyv1, dyv2,
+                         dx1, dx2, dy1, dy2, inv_area2, edge_values);
+
+      D->xmom_edge_values[k3 + 0] = edge_values[0];
+      D->xmom_edge_values[k3 + 1] = edge_values[1];
+      D->xmom_edge_values[k3 + 2] = edge_values[2]; 
+
+
+      beta_tmp = D->beta_vh_dry + (D->beta_vh - D->beta_vh_dry) * hfactor;
+
+      cv_k  = D->ymom_centroid_values[k];
+      cv_k0 = D->ymom_centroid_values[k0];
+      cv_k1 = D->ymom_centroid_values[k1];
+      cv_k2 = D->ymom_centroid_values[k2];
+
+      __calc_edge_values(beta_tmp, 
+                         cv_k, 
+                         cv_k0,
+                         cv_k1,
+                         cv_k2,
+                         dxv0, dxv1, dxv2, dyv0, dyv1, dyv2,
+                         dx1, dx2, dy1, dy2, inv_area2, edge_values);
+
+      D->ymom_edge_values[k3 + 0] = edge_values[0];
+      D->ymom_edge_values[k3 + 1] = edge_values[1];
+      D->ymom_edge_values[k3 + 2] = edge_values[2]; 
+
+      } 	
+    else
+    {
+      for (k2 = k3; k2 < k3 + 3; k2++)
+       {
+          if (D->surrogate_neighbours[k2] != k)
+        {
+          break;
+        }
+      }
+
+    k1 = D->surrogate_neighbours[k2];
+    coord_index = 2 * k1;
+    x1 = D->centroid_coordinates[coord_index + 0];
+    y1 = D->centroid_coordinates[coord_index + 1];
+
+    dx1 = x1 - x;
+    dy1 = y1 - y;
+
+
+    area2 = dx1 * dx1 + dy1 * dy1;
+    dx2 = 1.0 / area2;
+    dy2 = dx2 * dy1;
+    dx2 *= dx1;
+
+    dq1 = D->stage_centroid_values[k1] - D->stage_centroid_values[k];
+     a = dq1 * dx2;
+     b = dq1 * dy2;
+     dqv[0] = a * dxv0 + b * dyv0;
+     dqv[1] = a * dxv1 + b * dyv1;
+     dqv[2] = a * dxv2 + b * dyv2;
+
+    if (dq1 >= 0.0)
+      {
+        qmin = 0.0;
+        qmax = dq1;
+      }
+      else
+      {
+        qmin = dq1;
+        qmax = 0.0;
+      }
+     
+       __limit_gradient(dqv, qmin, qmax, D->beta_w);
+
+      D->stage_edge_values[k3 + 0] = D->stage_centroid_values[k] + dqv[0];
+      D->stage_edge_values[k3 + 1] = D->stage_centroid_values[k] + dqv[1];
+      D->stage_edge_values[k3 + 2] = D->stage_centroid_values[k] + dqv[2];
+
+      dq1 = D->height_centroid_values[k1] - D->height_centroid_values[k];
+       a = dq1 * dx2;
+       b = dq1 * dy2;
+
+        dqv[0] = a * dxv0 + b * dyv0;
+        dqv[1] = a * dxv1 + b * dyv1;
+        dqv[2] = a * dxv2 + b * dyv2;
+
+      if (dq1 >= 0.0)
+      {
+        qmin = 0.0;
+        qmax = dq1;
+      }
+      else
+      {
+        qmin = dq1;
+        qmax = 0.0;
+      }
+       
+       __limit_gradient(dqv, qmin, qmax, D->beta_w);
+
+      D->height_edge_values[k3 + 0] = D->height_centroid_values[k] + dqv[0];
+      D->height_edge_values[k3 + 1] = D->height_centroid_values[k] + dqv[1];
+      D->height_edge_values[k3 + 2] = D->height_centroid_values[k] + dqv[2];
+
+      dq1 = D->xmom_centroid_values[k1] - D->xmom_centroid_values[k];
+       a = dq1 * dx2;
+       b = dq1 * dy2;
+
+      dqv[0] = a * dxv0 + b * dyv0;
+      dqv[1] = a * dxv1 + b * dyv1;
+      dqv[2] = a * dxv2 + b * dyv2;
+
+      if (dq1 >= 0.0)
+      {
+        qmin = 0.0;
+        qmax = dq1;
+      }
+      else
+      {
+        qmin = dq1;
+        qmax = 0.0;
+      }
+
+      __limit_gradient(dqv, qmin, qmax, D->beta_w);
+
+      D->xmom_edge_values[k3 + 0] = D->xmom_centroid_values[k] + dqv[0];
+      D->xmom_edge_values[k3 + 1] = D->xmom_centroid_values[k] + dqv[1];
+      D->xmom_edge_values[k3 + 2] = D->xmom_centroid_values[k] + dqv[2];
+    
+      dq1 = D->ymom_centroid_values[k1] - D->ymom_centroid_values[k];
+
+      a = dq1 * dx2;
+      b = dq1 * dy2;
+
+      dqv[0] = a * dxv0 + b * dyv0;
+      dqv[1] = a * dxv1 + b * dyv1;
+      dqv[2] = a * dxv2 + b * dyv2;
+
+      if (dq1 >= 0.0)
+      {
+        qmin = 0.0;
+        qmax = dq1;
+      }
+      else
+      {
+        qmin = dq1;
+        qmax = 0.0;
+      }
+
+      __limit_gradient(dqv, qmin, qmax, D->beta_w);
+
+      D->ymom_edge_values[k3 + 0] = D->ymom_centroid_values[k] + dqv[0];
+      D->ymom_edge_values[k3 + 1] = D->ymom_centroid_values[k] + dqv[1];
+      D->ymom_edge_values[k3 + 2] = D->ymom_centroid_values[k] + dqv[2];
+
+    }
+
+    if (D->extrapolate_velocity_second_order == 1)
+    {
+     for (i = 0; i < 3; i++)
+      {
+        dk = D->height_edge_values[k3 + i];
+        D->xmom_edge_values[k3 + i] = D->xmom_edge_values[k3 + i] * dk;
+        D->ymom_edge_values[k3 + i] = D->ymom_edge_values[k3 + i] * dk;
+      }
+    }
+    
+    D->bed_edge_values[k3 + 0] = D->stage_edge_values[k3 + 0] - D->height_edge_values[k3 + 0];
+    D->bed_edge_values[k3 + 1] = D->stage_edge_values[k3 + 1] - D->height_edge_values[k3 + 1];
+    D->bed_edge_values[k3 + 2] = D->stage_edge_values[k3 + 2] - D->height_edge_values[k3 + 2];
+
+    D->stage_vertex_values[k3 + 0] = D->stage_edge_values[k3 + 1] + D->stage_edge_values[k3 + 2] - D->stage_edge_values[k3 + 0];
+    D->stage_vertex_values[k3 + 1] = D->stage_edge_values[k3 + 0] + D->stage_edge_values[k3 + 2] - D->stage_edge_values[k3 + 1];
+    D->stage_vertex_values[k3 + 2] = D->stage_edge_values[k3 + 0] + D->stage_edge_values[k3 + 1] - D->stage_edge_values[k3 + 2];
+
+    D->height_vertex_values[k3 + 0] = D->height_edge_values[k3 + 1] + D->height_edge_values[k3 + 2] - D->height_edge_values[k3 + 0];
+    D->height_vertex_values[k3 + 1] = D->height_edge_values[k3 + 0] + D->height_edge_values[k3 + 2] - D->height_edge_values[k3 + 1];
+    D->height_vertex_values[k3 + 2] = D->height_edge_values[k3 + 0] + D->height_edge_values[k3 + 1] - D->height_edge_values[k3 + 2];
+
+
+    D->xmom_vertex_values[k3 + 0] = D->xmom_edge_values[k3 + 1] + D->xmom_edge_values[k3 + 2] - D->xmom_edge_values[k3 + 0];
+    D->xmom_vertex_values[k3 + 1] = D->xmom_edge_values[k3 + 0] + D->xmom_edge_values[k3 + 2] - D->xmom_edge_values[k3 + 1];
+    D->xmom_vertex_values[k3 + 2] = D->xmom_edge_values[k3 + 0] + D->xmom_edge_values[k3 + 1] - D->xmom_edge_values[k3 + 2];
+
+    D->ymom_vertex_values[k3 + 0] = D->ymom_edge_values[k3 + 1] + D->ymom_edge_values[k3 + 2] - D->ymom_edge_values[k3 + 0];
+    D->ymom_vertex_values[k3 + 1] = D->ymom_edge_values[k3 + 0] + D->ymom_edge_values[k3 + 2] - D->ymom_edge_values[k3 + 1];
+    D->ymom_vertex_values[k3 + 2] = D->ymom_edge_values[k3 + 0] + D->ymom_edge_values[k3 + 1] - D->ymom_edge_values[k3 + 2];
+
+
+    D->bed_vertex_values[k3 + 0] = D->bed_edge_values[k3 + 1] + D->bed_edge_values[k3 + 2] - D->bed_edge_values[k3 + 0];
+    D->bed_vertex_values[k3 + 1] = D->bed_edge_values[k3 + 0] + D->bed_edge_values[k3 + 2] - D->bed_edge_values[k3 + 1];
+    D->bed_vertex_values[k3 + 2] = D->bed_edge_values[k3 + 0] + D->bed_edge_values[k3 + 1] - D->bed_edge_values[k3 + 2];
+
+
+    }
+
+
+#pragma omp parallel for simd private(k3, i, dk) firstprivate(extrapolate_velocity_second_order)
+  for (k = 0; k < D->number_of_elements; k++)
+  {
+    if (extrapolate_velocity_second_order == 1)
+    {
+      D->xmom_centroid_values[k] = D->x_centroid_work[k];
+      D->ymom_centroid_values[k] = D->y_centroid_work[k];
+    }
+
+    }  
 
   return 0;
 }
 
+      
 
 // Computational function for flux computation
-int _openacc_fix_negative_cells(struct domain *D)
+/*int _openmp_fix_negative_cells(struct domain *D)
 {
   long k;
   long tff;
   int num_negative_cells = 0;
 
-  // #pragma omp parallel for private(k, tff) reduction(+:num_negative_cells)
+  #pragma omp parallel for private(k, tff) reduction(+:num_negative_cells)
   for (k = 0; k < D->number_of_elements; k++)
   {
     tff = D->tri_full_flag[k];
@@ -1932,4 +2474,48 @@ int _openacc_fix_negative_cells(struct domain *D)
     }
   }
   return num_negative_cells;
+}*/
+
+
+//GPU openacc code
+//
+
+int _openacc_fix_negative_cells(struct domain *D)
+ {
+  long k;
+  int num_negative_cells = 0;
+  #pragma acc data copyin(D[:D->number_of_elements]) \
+                   copyout(num_negative_cells) \
+                   copy(D->tri_full_flag[:D->number_of_elements], \
+                        D->stage_centroid_values[:D->number_of_elements], \
+                        D->bed_centroid_values[:D->number_of_elements], \
+                        D->xmom_centroid_values[:D->number_of_elements], \
+                        D->ymom_centroid_values[:D->number_of_elements])
+  {
+    #pragma acc parallel loop private(k) reduction(+:num_negative_cells)
+    for (k = 0; k < D->number_of_elements; k++)
+    {
+      float diff = D->stage_centroid_values[k] - D->bed_centroid_values[k];
+      int tff = D->tri_full_flag[k];
+      int condition = (diff < 0.0) && (tff > 0);
+      
+      num_negative_cells += condition;
+
+      float bed_value = condition ? D->bed_centroid_values[k] : D->stage_centroid_values[k];
+      D->stage_centroid_values[k] = bed_value;
+      D->xmom_centroid_values[k] = condition ? 0.0 : D->xmom_centroid_values[k];
+      D->ymom_centroid_values[k] = condition ? 0.0 : D->ymom_centroid_values[k];
+    }
+  } // end data region
+
+// Deallocate GPU memory
+#pragma acc exit data delete(D[:D->number_of_elements], \
+                                D->tri_full_flag[:D->number_of_elements], \
+                                D->stage_centroid_values[:D->number_of_elements], \
+                                D->bed_centroid_values[:D->number_of_elements], \
+                                D->xmom_centroid_values[:D->number_of_elements], \
+                                D->ymom_centroid_values[:D->number_of_elements])
+
+  return num_negative_cells;
 }
+
